@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">TyrionDictionary</string>
+    <string name="hint_empty">Mag-type gamit ang keypad…</string>
+    <string name="btn_next">Susunod</string>
+    <string name="btn_back">⌫</string>
+    <string name="btn_space">SPACE</string>
+    <string name="btn_ok">OK</string>
+    <string name="key_star">* Susunod</string>
+    <string name="key_zero">0 SPACE</string>
+    <string name="key_hash"># ⌫</string>
+</resources>

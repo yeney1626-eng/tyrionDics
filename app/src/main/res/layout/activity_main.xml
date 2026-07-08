@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/tyrion_bg"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="12dp">
+
+        <ImageView
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:src="@mipmap/ic_launcher"
+            android:layout_marginEnd="10dp"
+            android:contentDescription="@string/app_name" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textColor="@color/tyrion_dark_text"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- Composed sentence area -->
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/tyrion_white"
+        android:padding="12dp">
+
+        <TextView
+            android:id="@+id/textComposed"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textColor="@color/tyrion_dark_text"
+            android:textSize="20sp"
+            android:lineSpacingExtra="4dp" />
+    </ScrollView>
+
+    <!-- Current suggestion / typing indicator -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@color/tyrion_key_bg"
+        android:padding="10dp"
+        android:layout_marginTop="8dp">
+
+        <TextView
+            android:id="@+id/textSuggestion"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/hint_empty"
+            android:textColor="@color/tyrion_rust"
+            android:textStyle="bold"
+            android:textSize="22sp" />
+
+        <TextView
+            android:id="@+id/textCandidateCount"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textColor="@color/tyrion_plum"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <!-- Keypad -->
+    <GridLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:columnCount="3"
+        android:rowCount="4">
+
+        <Button android:id="@+id/btn1" style="@style/KeyButton" android:text="1" />
+        <Button android:id="@+id/btn2" style="@style/KeyButton" android:text="2 ABC" />
+        <Button android:id="@+id/btn3" style="@style/KeyButton" android:text="3 DEF" />
+
+        <Button android:id="@+id/btn4" style="@style/KeyButton" android:text="4 GHI" />
+        <Button android:id="@+id/btn5" style="@style/KeyButton" android:text="5 JKL" />
+        <Button android:id="@+id/btn6" style="@style/KeyButton" android:text="6 MNO" />
+
+        <Button android:id="@+id/btn7" style="@style/KeyButton" android:text="7 PQRS" />
+        <Button android:id="@+id/btn8" style="@style/KeyButton" android:text="8 TUV" />
+        <Button android:id="@+id/btn9" style="@style/KeyButton" android:text="9 WXYZ" />
+
+        <Button android:id="@+id/btnStar" style="@style/KeyButtonAccent" android:text="@string/key_star" />
+        <Button android:id="@+id/btn0" style="@style/KeyButton" android:text="@string/key_zero" />
+        <Button android:id="@+id/btnHash" style="@style/KeyButtonAccent" android:text="@string/key_hash" />
+    </GridLayout>
+
+</LinearLayout>
