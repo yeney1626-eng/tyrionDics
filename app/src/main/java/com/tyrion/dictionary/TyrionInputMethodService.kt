@@ -1,24 +1,40 @@
 package com.tyrion.dictionary
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.pm.PackageManager
 import android.inputmethodservice.InputMethodService
+import android.os.Build
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import android.widget.TextView
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 
 /**
  * TyrionDictionary IME — reads the phone's physical number keys directly
  * (KeyEvent.KEYCODE_0..9, STAR, POUND, DEL) and predicts Filipino words, T9-style.
  *
- * The predicted word is shown live INSIDE the text field itself (as Android
- * "composing text", the standard underlined-preview mechanic), not in a
- * separate suggestion bar. Only a tiny mode indicator (abc / Abc / ABC / 123)
- * is shown, since that state isn't otherwise visible.
+ * Design choices:
+ * - NO on-screen view is ever shown (onEvaluateInputViewShown = false). The current
+ *   mode is instead shown as a small status bar notification, since that's the only
+ *   screen space this device really has to spare.
+ * - The predicted word is shown live INSIDE the text field itself ("composing text"),
+ *   not in any separate suggestion UI.
+ * - Only keys we actually use are consumed. Everything else (including backspace when
+ *   there's nothing to delete) is passed through untouched, so system Back behavior and
+ *   any accessibility service watching key events still get a chance to see it.
  *
- * Mode toggle: press * while NOT in the middle of a word to cycle
- * Proper -> CAPS -> lower -> 123 -> Proper ...
- * (While a word is being composed, * instead cycles suggestions for that word.)
+ * Controls:
+ * - 2-9: T9 predictive letters (or manual multi-tap letters when predictive is off)
+ * - 0: space (confirms the current word)
+ * - 1: punctuation cycle (. , ? ! ' - @)
+ * - *: cycle word suggestion if mid-word, otherwise cycle case mode (Abc/ABC/abc/123)
+ * - #: confirm word if mid-word; otherwise toggle predictive T9 on/off (or "." in 123 mode)
+ * - DEL: backspace (only consumed if there's actually something to delete)
+ * - ENTER: confirm word + editor action
  */
 class TyrionInputMethodService : InputMethodService() {
 
@@ -26,31 +42,44 @@ class TyrionInputMethodService : InputMethodService() {
 
     private val modeCycle = listOf(Mode.PROPER, Mode.CAPS, Mode.LOWER, Mode.NUMBER)
     private var mode = Mode.PROPER
+    private var predictiveEnabled = true
 
+    // --- Predictive (T9) state ---
     private val currentDigits = StringBuilder()
     private var candidateIndex = 0
 
+    // --- Manual multi-tap state (used when predictiveEnabled == false) ---
+    private var lastMultitapKeyCode = -1
+    private var lastMultitapTime = 0L
+    private var multitapIndex = 0
+    private var isWordStart = true
+    private val multitapTimeoutMs = 900L
+
+    // --- Punctuation cycling (shared by both modes) ---
     private var punctCycleIndex = -1
     private var lastActionWasPunct = false
     private val punctuations = listOf(".", ",", "?", "!", "'", "-", "@")
 
-    private lateinit var textMode: TextView
+    companion object {
+        private const val CHANNEL_ID = "tyrion_mode_channel"
+        private const val NOTIF_ID = 1001
+    }
 
     override fun onCreate() {
         super.onCreate()
         T9Dictionary.ensureLoaded(applicationContext)
+        ensureNotificationChannel()
     }
 
-    override fun onCreateInputView(): View {
-        val view = layoutInflater.inflate(R.layout.ime_candidates_view, null)
-        textMode = view.findViewById(R.id.imeMode)
-        refreshModeIndicator()
-        return view
-    }
+    // No on-screen keyboard UI at all — typing happens on the real hardware keypad.
+    override fun onEvaluateInputViewShown(): Boolean = false
+
+    override fun onCreateInputView(): View = View(this)
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         resetWordState()
+        updateModeNotification()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -59,10 +88,16 @@ class TyrionInputMethodService : InputMethodService() {
         if (currentDigits.isNotEmpty()) {
             commitCurrentWord(appendSpace = false)
         }
+        cancelModeNotification()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        cancelModeNotification()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        Log.d("TyrionIME", "onKeyDown keyCode=$keyCode mode=$mode")
+        Log.d("TyrionIME", "onKeyDown keyCode=$keyCode mode=$mode predictive=$predictiveEnabled")
         val digitChar = digitCharFor(keyCode)
 
         // --- Numeric mode: keys type literal digits, nothing is predicted ---
@@ -75,11 +110,17 @@ class TyrionInputMethodService : InputMethodService() {
             KeyEvent.KEYCODE_2, KeyEvent.KEYCODE_3, KeyEvent.KEYCODE_4,
             KeyEvent.KEYCODE_5, KeyEvent.KEYCODE_6, KeyEvent.KEYCODE_7,
             KeyEvent.KEYCODE_8, KeyEvent.KEYCODE_9 -> {
-                onDigitPressed(digitChar!!)
+                if (predictiveEnabled) onDigitPressed(digitChar!!) else onMultitapDigit(keyCode, digitChar!!)
                 true
             }
             KeyEvent.KEYCODE_0 -> {
-                commitCurrentWord(appendSpace = true)
+                if (predictiveEnabled) {
+                    commitCurrentWord(appendSpace = true)
+                } else {
+                    currentInputConnection?.commitText(" ", 1)
+                    lastMultitapKeyCode = -1
+                    isWordStart = true
+                }
                 true
             }
             KeyEvent.KEYCODE_1 -> {
@@ -87,7 +128,7 @@ class TyrionInputMethodService : InputMethodService() {
                 true
             }
             KeyEvent.KEYCODE_STAR -> {
-                if (currentDigits.isNotEmpty()) {
+                if (predictiveEnabled && currentDigits.isNotEmpty()) {
                     cycleSuggestion()
                 } else {
                     cycleMode()
@@ -95,24 +136,24 @@ class TyrionInputMethodService : InputMethodService() {
                 true
             }
             KeyEvent.KEYCODE_POUND -> {
-                if (mode == Mode.NUMBER) {
-                    currentInputConnection?.commitText(".", 1)
-                } else {
-                    commitCurrentWord(appendSpace = false)
+                when {
+                    mode == Mode.NUMBER -> currentInputConnection?.commitText(".", 1)
+                    predictiveEnabled && currentDigits.isNotEmpty() -> commitCurrentWord(appendSpace = false)
+                    else -> togglePredictive()
                 }
                 true
             }
-            KeyEvent.KEYCODE_DEL -> {
-                onBackspace()
-                true
-            }
-            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER -> {
-                if (currentDigits.isNotEmpty()) {
+            KeyEvent.KEYCODE_DEL -> onBackspace()
+            KeyEvent.KEYCODE_ENTER -> {
+                if (predictiveEnabled && currentDigits.isNotEmpty()) {
                     commitCurrentWord(appendSpace = false)
                 }
                 sendDefaultEditorAction(true)
                 true
             }
+            // Deliberately NOT intercepting KEYCODE_DPAD_CENTER, DPAD_UP/DOWN/LEFT/RIGHT,
+            // or KEYCODE_BACK: leaving these untouched keeps accessibility/cursor tools
+            // and normal navigation working while a text field is focused.
             else -> super.onKeyDown(keyCode, event)
         }
     }
@@ -131,12 +172,23 @@ class TyrionInputMethodService : InputMethodService() {
         else -> null
     }
 
-    // --- Mode handling ---
+    // --- Mode / predictive toggling ---
 
     private fun cycleMode() {
         val idx = (modeCycle.indexOf(mode) + 1) % modeCycle.size
         mode = modeCycle[idx]
-        refreshModeIndicator()
+        currentDigits.clear()
+        candidateIndex = 0
+        lastMultitapKeyCode = -1
+        updateModeNotification()
+    }
+
+    private fun togglePredictive() {
+        predictiveEnabled = !predictiveEnabled
+        currentDigits.clear()
+        candidateIndex = 0
+        lastMultitapKeyCode = -1
+        updateModeNotification()
     }
 
     private fun applyCase(word: String): String = when (mode) {
@@ -146,17 +198,21 @@ class TyrionInputMethodService : InputMethodService() {
         Mode.NUMBER -> word
     }
 
-    private fun refreshModeIndicator() {
-        if (!::textMode.isInitialized) return
-        textMode.text = when (mode) {
-            Mode.PROPER -> "Abc"
-            Mode.CAPS -> "ABC"
-            Mode.LOWER -> "abc"
-            Mode.NUMBER -> "123"
-        }
+    private fun casedChar(ch: Char): String = when (mode) {
+        Mode.CAPS -> ch.uppercase()
+        Mode.LOWER -> ch.lowercase()
+        Mode.PROPER -> if (isWordStart) ch.uppercase() else ch.lowercase()
+        Mode.NUMBER -> ch.toString()
     }
 
-    // --- Word composition (shown live in the text field via composing text) ---
+    private fun caseLabel(): String = when (mode) {
+        Mode.PROPER -> "Abc"
+        Mode.CAPS -> "ABC"
+        Mode.LOWER -> "abc"
+        Mode.NUMBER -> "123"
+    }
+
+    // --- T9 predictive word composition (shown live in the text field) ---
 
     private fun onDigitPressed(digit: Char) {
         currentDigits.append(digit)
@@ -173,38 +229,6 @@ class TyrionInputMethodService : InputMethodService() {
         }
     }
 
-    private fun onBackspace() {
-        if (currentDigits.isNotEmpty()) {
-            currentDigits.deleteCharAt(currentDigits.length - 1)
-            candidateIndex = 0
-            if (currentDigits.isEmpty()) {
-                currentInputConnection?.commitText("", 1) // clears the composing span
-            } else {
-                updateComposing()
-            }
-        } else {
-            currentInputConnection?.deleteSurroundingText(1, 0)
-        }
-        lastActionWasPunct = false
-    }
-
-    private fun onOnePressed() {
-        // Commit any pending word first (without a trailing space), then cycle punctuation.
-        if (currentDigits.isNotEmpty()) {
-            commitCurrentWord(appendSpace = false)
-        }
-        val ic = currentInputConnection ?: return
-        if (lastActionWasPunct) {
-            ic.deleteSurroundingText(1, 0)
-            punctCycleIndex = (punctCycleIndex + 1) % punctuations.size
-        } else {
-            punctCycleIndex = 0
-        }
-        ic.commitText(punctuations[punctCycleIndex], 1)
-        lastActionWasPunct = true
-    }
-
-    /** Shows the current best-guess word live in the field, underlined, uncommitted. */
     private fun updateComposing() {
         val ic = currentInputConnection ?: return
         val code = currentDigits.toString()
@@ -236,11 +260,128 @@ class TyrionInputMethodService : InputMethodService() {
         lastActionWasPunct = false
     }
 
+    // --- Manual multi-tap word composition (used when predictive is OFF) ---
+
+    private fun onMultitapDigit(keyCode: Int, digit: Char) {
+        val letters = T9Dictionary.lettersForDigit(digit) ?: return
+        val ic = currentInputConnection ?: return
+        val now = System.currentTimeMillis()
+
+        if (keyCode == lastMultitapKeyCode && now - lastMultitapTime < multitapTimeoutMs) {
+            multitapIndex = (multitapIndex + 1) % letters.length
+            ic.deleteSurroundingText(1, 0)
+        } else {
+            multitapIndex = 0
+        }
+
+        ic.commitText(casedChar(letters[multitapIndex]), 1)
+        lastMultitapKeyCode = keyCode
+        lastMultitapTime = now
+        isWordStart = false
+        lastActionWasPunct = false
+    }
+
+    // --- Shared: punctuation cycling and backspace ---
+
+    private fun onOnePressed() {
+        if (predictiveEnabled && currentDigits.isNotEmpty()) {
+            commitCurrentWord(appendSpace = false)
+        }
+        val ic = currentInputConnection ?: return
+        if (lastActionWasPunct) {
+            ic.deleteSurroundingText(1, 0)
+            punctCycleIndex = (punctCycleIndex + 1) % punctuations.size
+        } else {
+            punctCycleIndex = 0
+        }
+        ic.commitText(punctuations[punctCycleIndex], 1)
+        lastActionWasPunct = true
+        lastMultitapKeyCode = -1
+        isWordStart = true
+    }
+
+    /** Returns true only if we actually consumed the key (i.e. there was something to delete). */
+    private fun onBackspace(): Boolean {
+        if (predictiveEnabled && currentDigits.isNotEmpty()) {
+            currentDigits.deleteCharAt(currentDigits.length - 1)
+            candidateIndex = 0
+            if (currentDigits.isEmpty()) {
+                currentInputConnection?.commitText("", 1) // clears the composing span
+            } else {
+                updateComposing()
+            }
+            lastActionWasPunct = false
+            return true
+        }
+
+        lastActionWasPunct = false
+        lastMultitapKeyCode = -1
+        val ic = currentInputConnection ?: return false
+        val before = ic.getTextBeforeCursor(1, 0)
+        return if (!before.isNullOrEmpty()) {
+            ic.deleteSurroundingText(1, 0)
+            true
+        } else {
+            // Nothing to delete: don't consume the key, so it can act as Back / propagate normally.
+            false
+        }
+    }
+
     private fun resetWordState() {
         currentDigits.clear()
         candidateIndex = 0
         punctCycleIndex = -1
         lastActionWasPunct = false
-        refreshModeIndicator()
+        lastMultitapKeyCode = -1
+        isWordStart = true
+    }
+
+    // --- Status bar mode indicator (replaces any on-screen UI) ---
+
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "TyrionDictionary mode",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Kasalukuyang mode ng TyrionDictionary keyboard"
+                setShowBadge(false)
+            }
+            manager?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun statusText(): String =
+        if (mode == Mode.NUMBER) "123" else "${caseLabel()} • ${if (predictiveEnabled) "T9" else "MULTI"}"
+
+    private fun updateModeNotification() {
+        if (!hasNotificationPermission()) return
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_tyrion)
+            .setContentTitle("TyrionDictionary")
+            .setContentText(statusText())
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        NotificationManagerCompat.from(this).notify(NOTIF_ID, notification)
+    }
+
+    private fun cancelModeNotification() {
+        NotificationManagerCompat.from(this).cancel(NOTIF_ID)
     }
 }
