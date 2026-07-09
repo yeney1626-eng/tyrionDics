@@ -1,13 +1,12 @@
 <resources>
     <string name="app_name">TyrionDictionary</string>
-    <string name="hint_empty">Mag-type gamit ang keypad…</string>
 
     <string name="setup_intro">Gamitin ang TyrionDictionary bilang T9 predictive keyboard sa iyong Duoqin F22 Pro, gamit ang tunay na physical keypad — walang lalabas na on-screen na keyboard. Sundin ang dalawang hakbang sa ibaba para paganahin ito.</string>
 
     <string name="btn_open_settings">1. Buksan ang Keyboard Settings</string>
     <string name="btn_pick_keyboard">2. Piliin ang TyrionDictionary</string>
 
-    <string name="setup_keys_help">Sa Settings, i-toggle ang TyrionDictionary para ma-enable ito, pagkatapos pindutin ang \"Piliin ang TyrionDictionary\" (o ang keyboard-switch key ng telepono) para gamitin ito.\n\nPaano gamitin ang keypad:\n2–9 = mga titik (T9)\n0 = SPACE\n* = susunod na suhestiyon\n# = kumpirmahin ang salita\nDEL/C = backspace\n1 = bantas (. , ? ! \' - @)</string>
+    <string name="setup_keys_help">Sa Settings, i-toggle ang TyrionDictionary para ma-enable ito, pagkatapos pindutin ang \"Piliin ang TyrionDictionary\" (o ang keyboard-switch key ng telepono) para gamitin ito.\n\nPaano gamitin ang keypad:\n2–9 = mga titik (T9), lalabas mismo sa text field\n0 = SPACE (kumpirmahin ang salita)\n# = kumpirmahin ang salita (walang space)\n* = susunod na suhestiyon (kung may kasalukuyang salita)\nDEL/C = backspace\n1 = bantas (. , ? ! \' - @)\n\nMode toggle (Abc / ABC / abc / 123):\nPindutin ang * kapag WALANG kasalukuyang tinatayp na salita para lumipat ng mode.\n• Abc = unang letra malaki (Proper)\n• ABC = lahat malaki (Capital)\n• abc = lahat maliit (lowercase)\n• 123 = numero mode — direktang nagta-type ng numero, walang prediction. Sa mode na ito, # = \".\" (decimal point).</string>
 
     <string name="test_field_label">Subukan dito:</string>
 </resources>
