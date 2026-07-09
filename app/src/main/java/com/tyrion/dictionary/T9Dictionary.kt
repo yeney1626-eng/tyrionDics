@@ -50,6 +50,9 @@ object T9Dictionary {
 
     fun candidatesFor(code: String): List<String>? = index[code]
 
+    /** Letters assigned to a given digit key, e.g. lettersForDigit('2') -> "abc". Used by manual multi-tap mode. */
+    fun lettersForDigit(digit: Char): String? = keyLetters[digit]
+
     private fun wordToT9(word: String): String? {
         val sb = StringBuilder()
         for (ch in word.lowercase()) {
