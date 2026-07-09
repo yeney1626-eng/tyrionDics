@@ -1,11 +1,13 @@
 <resources>
     <string name="app_name">TyrionDictionary</string>
     <string name="hint_empty">Mag-type gamit ang keypad…</string>
-    <string name="btn_next">Susunod</string>
-    <string name="btn_back">⌫</string>
-    <string name="btn_space">SPACE</string>
-    <string name="btn_ok">OK</string>
-    <string name="key_star">* Susunod</string>
-    <string name="key_zero">0 SPACE</string>
-    <string name="key_hash"># ⌫</string>
+
+    <string name="setup_intro">Gamitin ang TyrionDictionary bilang T9 predictive keyboard sa iyong Duoqin F22 Pro, gamit ang tunay na physical keypad — walang lalabas na on-screen na keyboard. Sundin ang dalawang hakbang sa ibaba para paganahin ito.</string>
+
+    <string name="btn_open_settings">1. Buksan ang Keyboard Settings</string>
+    <string name="btn_pick_keyboard">2. Piliin ang TyrionDictionary</string>
+
+    <string name="setup_keys_help">Sa Settings, i-toggle ang TyrionDictionary para ma-enable ito, pagkatapos pindutin ang \"Piliin ang TyrionDictionary\" (o ang keyboard-switch key ng telepono) para gamitin ito.\n\nPaano gamitin ang keypad:\n2–9 = mga titik (T9)\n0 = SPACE\n* = susunod na suhestiyon\n# = kumpirmahin ang salita\nDEL/C = backspace\n1 = bantas (. , ? ! \' - @)</string>
+
+    <string name="test_field_label">Subukan dito:</string>
 </resources>
