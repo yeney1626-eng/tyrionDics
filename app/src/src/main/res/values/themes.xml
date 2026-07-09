@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.TyrionDictionary" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/tyrion_rust</item>
+        <item name="colorPrimaryDark">@color/tyrion_plum</item>
+        <item name="colorAccent">@color/tyrion_plum</item>
+        <item name="android:windowBackground">@color/tyrion_bg</item>
+    </style>
+</resources>
