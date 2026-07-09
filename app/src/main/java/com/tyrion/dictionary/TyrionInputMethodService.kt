@@ -1,28 +1,22 @@
 package com.tyrion.dictionary
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.content.pm.PackageManager
 import android.inputmethodservice.InputMethodService
-import android.os.Build
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.ContextCompat
+import android.widget.TextView
 
 /**
  * TyrionDictionary IME — reads the phone's physical number keys directly
  * (KeyEvent.KEYCODE_0..9, STAR, POUND, DEL) and predicts Filipino words, T9-style.
  *
  * Design choices:
- * - NO on-screen view is ever shown (onEvaluateInputViewShown = false). The current
- *   mode is instead shown as a small status bar notification, since that's the only
- *   screen space this device really has to spare.
- * - The predicted word is shown live INSIDE the text field itself ("composing text"),
- *   not in any separate suggestion UI.
+ * - No keyboard grid is ever shown. The only on-screen element is a single-line
+ *   status badge (e.g. "Abc • T9") so the current case/prediction mode is always
+ *   visible without needing to pull down a notification shade.
+ * - The predicted word itself is shown live INSIDE the text field ("composing text"),
+ *   not in any suggestion list.
  * - Only keys we actually use are consumed. Everything else (including backspace when
  *   there's nothing to delete) is passed through untouched, so system Back behavior and
  *   any accessibility service watching key events still get a chance to see it.
@@ -60,26 +54,24 @@ class TyrionInputMethodService : InputMethodService() {
     private var lastActionWasPunct = false
     private val punctuations = listOf(".", ",", "?", "!", "'", "-", "@")
 
-    companion object {
-        private const val CHANNEL_ID = "tyrion_mode_channel"
-        private const val NOTIF_ID = 1001
-    }
+    private lateinit var textMode: TextView
 
     override fun onCreate() {
         super.onCreate()
         T9Dictionary.ensureLoaded(applicationContext)
-        ensureNotificationChannel()
     }
 
-    // No on-screen keyboard UI at all — typing happens on the real hardware keypad.
-    override fun onEvaluateInputViewShown(): Boolean = false
-
-    override fun onCreateInputView(): View = View(this)
+    override fun onCreateInputView(): View {
+        val view = layoutInflater.inflate(R.layout.ime_mode_view, null)
+        textMode = view.findViewById(R.id.imeMode)
+        refreshModeIndicator()
+        return view
+    }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         resetWordState()
-        updateModeNotification()
+        refreshModeIndicator()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -88,12 +80,6 @@ class TyrionInputMethodService : InputMethodService() {
         if (currentDigits.isNotEmpty()) {
             commitCurrentWord(appendSpace = false)
         }
-        cancelModeNotification()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        cancelModeNotification()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -180,7 +166,7 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.clear()
         candidateIndex = 0
         lastMultitapKeyCode = -1
-        updateModeNotification()
+        refreshModeIndicator()
     }
 
     private fun togglePredictive() {
@@ -188,7 +174,7 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.clear()
         candidateIndex = 0
         lastMultitapKeyCode = -1
-        updateModeNotification()
+        refreshModeIndicator()
     }
 
     private fun applyCase(word: String): String = when (mode) {
@@ -212,6 +198,17 @@ class TyrionInputMethodService : InputMethodService() {
         Mode.NUMBER -> "123"
     }
 
+    /** Turns a T9 digit code with no dictionary match into letters instead of raw numbers,
+     *  e.g. "26" (no match) -> "an" (first letter of each key), so the user never sees digits. */
+    private fun literalLettersFallback(code: String): String {
+        val sb = StringBuilder()
+        for (d in code) {
+            val letters = T9Dictionary.lettersForDigit(d)
+            sb.append(letters?.firstOrNull() ?: d)
+        }
+        return sb.toString()
+    }
+
     // --- T9 predictive word composition (shown live in the text field) ---
 
     private fun onDigitPressed(digit: Char) {
@@ -229,29 +226,25 @@ class TyrionInputMethodService : InputMethodService() {
         }
     }
 
-    private fun updateComposing() {
-        val ic = currentInputConnection ?: return
-        val code = currentDigits.toString()
+    private fun bestGuessFor(code: String): String {
         val candidates = T9Dictionary.candidatesFor(code)
-        val display = if (candidates != null && candidates.isNotEmpty()) {
+        return if (candidates != null && candidates.isNotEmpty()) {
             applyCase(candidates[candidateIndex % candidates.size])
         } else {
-            code // no dictionary match yet: show the raw digits being typed
+            applyCase(literalLettersFallback(code))
         }
-        ic.setComposingText(display, 1)
+    }
+
+    private fun updateComposing() {
+        val ic = currentInputConnection ?: return
+        ic.setComposingText(bestGuessFor(currentDigits.toString()), 1)
     }
 
     private fun commitCurrentWord(appendSpace: Boolean) {
         val ic = currentInputConnection
         val code = currentDigits.toString()
         if (code.isNotEmpty()) {
-            val candidates = T9Dictionary.candidatesFor(code)
-            val word = if (candidates != null && candidates.isNotEmpty()) {
-                applyCase(candidates[candidateIndex % candidates.size])
-            } else {
-                code
-            }
-            ic?.commitText(word + if (appendSpace) " " else "", 1)
+            ic?.commitText(bestGuessFor(code) + if (appendSpace) " " else "", 1)
         } else if (appendSpace) {
             ic?.commitText(" ", 1)
         }
@@ -336,52 +329,14 @@ class TyrionInputMethodService : InputMethodService() {
         isWordStart = true
     }
 
-    // --- Status bar mode indicator (replaces any on-screen UI) ---
+    // --- On-screen mode badge (single line, always visible while typing) ---
 
-    private fun ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "TyrionDictionary mode",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Kasalukuyang mode ng TyrionDictionary keyboard"
-                setShowBadge(false)
-            }
-            manager?.createNotificationChannel(channel)
-        }
-    }
-
-    private fun hasNotificationPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= 33) {
-            ContextCompat.checkSelfPermission(
-                this,
-                android.Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
+    private fun refreshModeIndicator() {
+        if (!::textMode.isInitialized) return
+        textMode.text = if (mode == Mode.NUMBER) {
+            "123"
         } else {
-            true
+            "${caseLabel()} • ${if (predictiveEnabled) "T9" else "MULTI"}"
         }
-    }
-
-    private fun statusText(): String =
-        if (mode == Mode.NUMBER) "123" else "${caseLabel()} • ${if (predictiveEnabled) "T9" else "MULTI"}"
-
-    private fun updateModeNotification() {
-        if (!hasNotificationPermission()) return
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_tyrion)
-            .setContentTitle("TyrionDictionary")
-            .setContentText(statusText())
-            .setOngoing(true)
-            .setShowWhen(false)
-            .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-        NotificationManagerCompat.from(this).notify(NOTIF_ID, notification)
-    }
-
-    private fun cancelModeNotification() {
-        NotificationManagerCompat.from(this).cancel(NOTIF_ID)
     }
 }
