@@ -1,9 +1,14 @@
 package com.tyrion.dictionary
 
+import android.content.Intent
+import android.graphics.PixelFormat
 import android.inputmethodservice.InputMethodService
+import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.TextView
 
@@ -12,14 +17,23 @@ import android.widget.TextView
  * (KeyEvent.KEYCODE_0..9, STAR, POUND, DEL) and predicts Filipino words, T9-style.
  *
  * Design choices:
- * - No keyboard grid is ever shown. The only on-screen element is a single-line
- *   status badge (e.g. "Abc • T9") so the current case/prediction mode is always
- *   visible without needing to pull down a notification shade.
+ * - This IME NEVER shows an actual input-method window (onEvaluateInputViewShown = false).
+ *   That's deliberate: Android's default behavior is to make the FIRST press of the
+ *   physical Back key dismiss any visible IME window rather than let it reach the app
+ *   underneath — even for a tiny one-line badge. Showing zero IME window sidesteps that
+ *   entirely, so Back always reaches the app on the first press.
+ * - The mode/predictive status (e.g. "Abc • T9") is instead shown as a small floating
+ *   overlay badge, drawn independently via WindowManager — NOT part of the IME-view
+ *   system, so it doesn't trigger the Back-swallowing behavior above. This needs the
+ *   "Display over other apps" permission, requested from MainActivity.
+ * - We also broadcast our actual typing start/stop to the ClickyCursor accessibility
+ *   app (if installed), since that app used to infer "is a keyboard visible" purely by
+ *   scanning accessibility windows — which never saw anything from us once we stopped
+ *   showing an IME window. This keeps its cursor-hide/typing-handoff behavior accurate.
  * - The predicted word itself is shown live INSIDE the text field ("composing text"),
  *   not in any suggestion list.
  * - Only keys we actually use are consumed. Everything else (including backspace when
- *   there's nothing to delete) is passed through untouched, so system Back behavior and
- *   any accessibility service watching key events still get a chance to see it.
+ *   there's nothing to delete, and Back always) is passed through untouched.
  *
  * Controls:
  * - 2-9: T9 predictive letters (or manual multi-tap letters when predictive is off)
@@ -33,6 +47,14 @@ import android.widget.TextView
 class TyrionInputMethodService : InputMethodService() {
 
     private enum class Mode { PROPER, CAPS, LOWER, NUMBER }
+
+    companion object {
+        // Contract with ClickyCursor: explicit (setPackage-targeted) broadcast telling it
+        // whether we're actively composing text right now.
+        private const val ACTION_TYPING_STATE = "com.tyrion.dictionary.TYPING_STATE"
+        private const val EXTRA_TYPING = "typing"
+        private const val CLICKY_CURSOR_PACKAGE = "com.example.clickycursor"
+    }
 
     private val modeCycle = listOf(Mode.PROPER, Mode.CAPS, Mode.LOWER, Mode.NUMBER)
     private var mode = Mode.PROPER
@@ -54,24 +76,27 @@ class TyrionInputMethodService : InputMethodService() {
     private var lastActionWasPunct = false
     private val punctuations = listOf(".", ",", "?", "!", "'", "-", "@")
 
-    private lateinit var textMode: TextView
+    // --- Floating mode badge (independent of the IME-view system) ---
+    private lateinit var windowManager: WindowManager
+    private var overlayView: TextView? = null
 
     override fun onCreate() {
         super.onCreate()
         T9Dictionary.ensureLoaded(applicationContext)
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
     }
 
-    override fun onCreateInputView(): View {
-        val view = layoutInflater.inflate(R.layout.ime_mode_view, null)
-        textMode = view.findViewById(R.id.imeMode)
-        refreshModeIndicator()
-        return view
-    }
+    // No IME window is ever shown — see the class-level note on why.
+    override fun onEvaluateInputViewShown(): Boolean = false
+
+    override fun onCreateInputView(): View = View(this)
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         resetWordState()
-        refreshModeIndicator()
+        addOverlayIfPermitted()
+        updateOverlayText()
+        sendTypingState(true)
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -80,10 +105,23 @@ class TyrionInputMethodService : InputMethodService() {
         if (currentDigits.isNotEmpty()) {
             commitCurrentWord(appendSpace = false)
         }
+        removeOverlay()
+        sendTypingState(false)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        removeOverlay()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         Log.d("TyrionIME", "onKeyDown keyCode=$keyCode mode=$mode predictive=$predictiveEnabled")
+
+        // Never touch Back — always let it fall straight through to the app/system.
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            return false
+        }
+
         val digitChar = digitCharFor(keyCode)
 
         // --- Numeric mode: keys type literal digits, nothing is predicted ---
@@ -137,9 +175,8 @@ class TyrionInputMethodService : InputMethodService() {
                 sendDefaultEditorAction(true)
                 true
             }
-            // Deliberately NOT intercepting KEYCODE_DPAD_CENTER, DPAD_UP/DOWN/LEFT/RIGHT,
-            // or KEYCODE_BACK: leaving these untouched keeps accessibility/cursor tools
-            // and normal navigation working while a text field is focused.
+            // Deliberately NOT intercepting KEYCODE_DPAD_CENTER, DPAD_UP/DOWN/LEFT/RIGHT:
+            // leaving these untouched keeps accessibility/cursor tools working normally.
             else -> super.onKeyDown(keyCode, event)
         }
     }
@@ -166,7 +203,7 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.clear()
         candidateIndex = 0
         lastMultitapKeyCode = -1
-        refreshModeIndicator()
+        updateOverlayText()
     }
 
     private fun togglePredictive() {
@@ -174,7 +211,7 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.clear()
         candidateIndex = 0
         lastMultitapKeyCode = -1
-        refreshModeIndicator()
+        updateOverlayText()
     }
 
     private fun applyCase(word: String): String = when (mode) {
@@ -315,7 +352,7 @@ class TyrionInputMethodService : InputMethodService() {
             ic.deleteSurroundingText(1, 0)
             true
         } else {
-            // Nothing to delete: don't consume the key, so it can act as Back / propagate normally.
+            // Nothing to delete: don't consume the key, so it can propagate normally.
             false
         }
     }
@@ -329,14 +366,65 @@ class TyrionInputMethodService : InputMethodService() {
         isWordStart = true
     }
 
-    // --- On-screen mode badge (single line, always visible while typing) ---
+    // --- Floating mode badge (WindowManager overlay, independent of the IME view) ---
 
-    private fun refreshModeIndicator() {
-        if (!::textMode.isInitialized) return
-        textMode.text = if (mode == Mode.NUMBER) {
-            "123"
-        } else {
-            "${caseLabel()} • ${if (predictiveEnabled) "T9" else "MULTI"}"
+    private fun statusText(): String =
+        if (mode == Mode.NUMBER) "123" else "${caseLabel()} • ${if (predictiveEnabled) "T9" else "MULTI"}"
+
+    private fun addOverlayIfPermitted() {
+        if (overlayView != null) return
+        if (!Settings.canDrawOverlays(this)) return
+
+        val badge = TextView(this).apply {
+            text = statusText()
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF5B2A4D.toInt())
+            textSize = 13f
+            setPadding(24, 8, 24, 8)
         }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+        }
+
+        try {
+            windowManager.addView(badge, params)
+            overlayView = badge
+        } catch (e: Exception) {
+            // Permission revoked or window token issue; just skip showing the badge.
+        }
+    }
+
+    private fun removeOverlay() {
+        overlayView?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (e: Exception) {
+                // Already removed or never attached; safe to ignore.
+            }
+        }
+        overlayView = null
+    }
+
+    private fun updateOverlayText() {
+        overlayView?.text = statusText()
+    }
+
+    // --- Typing-state broadcast (lets ClickyCursor's accessibility service know
+    //     we're actively composing, since it can no longer see an IME window from us) ---
+
+    private fun sendTypingState(typing: Boolean) {
+        val intent = Intent(ACTION_TYPING_STATE).apply {
+            setPackage(CLICKY_CURSOR_PACKAGE)
+            putExtra(EXTRA_TYPING, typing)
+        }
+        sendBroadcast(intent)
     }
 }
