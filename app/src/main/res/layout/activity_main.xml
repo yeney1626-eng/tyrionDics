@@ -58,6 +58,24 @@
             android:text="@string/btn_pick_keyboard"
             android:backgroundTint="@color/tyrion_plum"
             android:textColor="@color/tyrion_white"
+            android:layout_marginBottom="10dp" />
+
+        <Button
+            android:id="@+id/btnGrantOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_grant_overlay"
+            android:backgroundTint="@color/tyrion_rust"
+            android:textColor="@color/tyrion_white"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:id="@+id/tvOverlayStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textColor="@color/tyrion_dark_text"
+            android:textSize="12sp"
             android:layout_marginBottom="24dp" />
 
         <TextView
