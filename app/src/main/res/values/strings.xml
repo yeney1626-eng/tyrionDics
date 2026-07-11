@@ -5,7 +5,7 @@
 
     <string name="btn_open_settings">1. Buksan ang Keyboard Settings</string>
     <string name="btn_pick_keyboard">2. Piliin ang TyrionDictionary</string>
-    <string name="btn_grant_overlay">3. Payagan ang Mode Badge (Overlay)</string>
+    <string name="btn_enable_notifications">3. Paganahin ang Status Notification</string>
 
     <string name="setup_keys_help">Sa Settings, i-toggle ang TyrionDictionary para ma-enable ito, pagkatapos pindutin ang \"Piliin ang TyrionDictionary\" (o ang keyboard-switch key ng telepono) para gamitin ito. Payagan din ang overlay permission sa button #3 para makita mo ang kasalukuyang mode.\n\nMakikita mo ang kasalukuyang mode sa isang maliit na badge sa itaas-kaliwa ng screen (hal. \"Abc • T9\"), at ang prediction mismo ay lalabas sa loob ng text field habang nagta-type ka.\n\nPaano gamitin ang keypad:\n2–9 = mga titik\n0 = SPACE (kumpirmahin ang salita)\n1 = bantas (. , ? ! \' - @)\nDEL/C = backspace (kung walang tatanggalin, gagana ito bilang Back)\n\nDalawang toggle, pindutin kapag walang kasalukuyang tinatayp na salita:\n* = case mode: Abc → ABC → abc → 123\n# = T9 (prediction) ↔ MULTI (manual — kapag hindi available ang salita sa diksyunaryo, i-toggle sa MULTI at pindutin nang paulit-ulit ang key para pumili ng letra, tulad ng lumang multi-tap na keypad)\n\nSa 123 mode: direktang numero ang ita-type, walang prediction, at # = \".\"</string>
 
