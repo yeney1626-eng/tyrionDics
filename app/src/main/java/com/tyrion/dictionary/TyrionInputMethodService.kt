@@ -1,16 +1,18 @@
 package com.tyrion.dictionary
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
-import android.graphics.PixelFormat
+import android.content.pm.PackageManager
 import android.inputmethodservice.InputMethodService
-import android.provider.Settings
+import android.os.Build
 import android.util.Log
-import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
-import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
-import android.widget.TextView
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 
 /**
  * TyrionDictionary IME — reads the phone's physical number keys directly
@@ -22,10 +24,11 @@ import android.widget.TextView
  *   physical Back key dismiss any visible IME window rather than let it reach the app
  *   underneath — even for a tiny one-line badge. Showing zero IME window sidesteps that
  *   entirely, so Back always reaches the app on the first press.
- * - The mode/predictive status (e.g. "Proper • Predictive") is instead shown as a small
- *   floating overlay badge, drawn independently via WindowManager — NOT part of the
- *   IME-view system, so it doesn't trigger the Back-swallowing behavior above. This needs
- *   the "Display over other apps" permission, requested from MainActivity.
+ * - The mode/predictive status (e.g. "Abc • T9") is shown via a status bar notification
+ *   (not a floating overlay — that used TYPE_APPLICATION_OVERLAY and never actually
+ *   rendered on this device/firmware). A notification is the same approach sspanak's TT9
+ *   uses, and its changelog specifically documents this fixing visibility/compatibility
+ *   issues on Qin F21 Pro-family phones — the same family as this device.
  * - We also broadcast our actual typing start/stop to the ClickyCursor accessibility
  *   app (if installed), since that app used to infer "is a keyboard visible" purely by
  *   scanning accessibility windows — which never saw anything from us once we stopped
@@ -34,14 +37,18 @@ import android.widget.TextView
  *   not in any suggestion list.
  * - Only keys we actually use are consumed. Everything else (including backspace when
  *   there's nothing to delete, and Back always) is passed through untouched.
+ * - Whole-word delete (KEYCODE_DEL only) is implemented standalone here, independent of
+ *   whatever ClickyCursor does on its own for the Back key — so it still works correctly
+ *   even when ClickyCursor/its accessibility service isn't active.
  *
  * Controls:
  * - 2-9: T9 predictive letters (or manual multi-tap letters when predictive is off)
  * - 0: space (confirms the current word)
- * - 1: punctuation cycle (. , ? ! ' - @)
- * - *: cycle word suggestion if mid-word, otherwise cycle case mode (Proper/CAPITAL/lowercase/Numbers)
- * - #: confirm word if mid-word; otherwise toggle Predictive/Manual (or "." in Numbers mode)
- * - DEL: backspace (only consumed if there's actually something to delete)
+ * - 1: punctuation cycle
+ * - *: cycle word suggestion if mid-word, otherwise cycle case mode (Abc/ABC/abc/123)
+ * - #: confirm word if mid-word; otherwise toggle predictive T9 on/off (or "." in 123 mode)
+ * - DEL: backspace — deletes the whole last predicted word in one shot if pressed right
+ *   after a commit, otherwise one character (only consumed if there's something to delete)
  * - ENTER: confirm word + editor action
  */
 class TyrionInputMethodService : InputMethodService() {
@@ -54,6 +61,9 @@ class TyrionInputMethodService : InputMethodService() {
         private const val ACTION_TYPING_STATE = "com.tyrion.dictionary.TYPING_STATE"
         private const val EXTRA_TYPING = "typing"
         private const val CLICKY_CURSOR_PACKAGE = "com.example.clickycursor"
+
+        private const val NOTIF_CHANNEL_ID = "tyrion_mode_channel"
+        private const val NOTIF_ID = 1001
     }
 
     private val modeCycle = listOf(Mode.PROPER, Mode.CAPS, Mode.LOWER, Mode.NUMBER)
@@ -69,6 +79,17 @@ class TyrionInputMethodService : InputMethodService() {
     // char. Any other action resets this back to 0.
     private var lastCommitLength = 0
 
+    // What we last set as composing text, used to verify the field still matches what we
+    // expect — if it doesn't, something external (e.g. an accessibility service editing the
+    // field directly) changed it, and our currentDigits buffer needs to be dropped instead of
+    // continuing to build predictions on stale, already-gone digits.
+    private var composingPreviewText = ""
+
+    // True at the very start of input, and right after sentence-ending punctuation (. ! ?) or
+    // Enter — the next Proper-mode word gets capitalized only when this is true, matching
+    // normal "auto-capitalize" behavior instead of capitalizing every single word.
+    private var isSentenceStart = true
+
     // --- Manual multi-tap state (used when predictiveEnabled == false) ---
     private var lastMultitapKeyCode = -1
     private var lastMultitapTime = 0L
@@ -83,14 +104,10 @@ class TyrionInputMethodService : InputMethodService() {
         ".", ",", "!", "?", "(", ")", "&", "%", "-", "_", ":", ";", "'", "\"", "<", ">", "@", "#"
     )
 
-    // --- Floating mode badge (independent of the IME-view system) ---
-    private lateinit var windowManager: WindowManager
-    private var overlayView: TextView? = null
-
     override fun onCreate() {
         super.onCreate()
         T9Dictionary.ensureLoaded(applicationContext)
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        ensureNotificationChannel()
     }
 
     // No IME window is ever shown — see the class-level note on why.
@@ -101,8 +118,7 @@ class TyrionInputMethodService : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         resetWordState()
-        addOverlayIfPermitted()
-        updateOverlayText()
+        updateStatusNotification()
         sendTypingState(true)
     }
 
@@ -112,25 +128,27 @@ class TyrionInputMethodService : InputMethodService() {
         if (currentDigits.isNotEmpty()) {
             commitCurrentWord(appendSpace = false)
         }
-        removeOverlay()
+        cancelStatusNotification()
         sendTypingState(false)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        removeOverlay()
+        cancelStatusNotification()
     }
 
     /**
      * Fires whenever the field's text/cursor changes for ANY reason — including edits made
-     * by something else entirely, like ClickyCursor's accessibility-based backspace, which
-     * edits the field directly and never goes through our onKeyDown at all. When that
-     * happens, our internal currentDigits buffer doesn't know a delete just occurred, and
-     * would otherwise keep building predictions on top of stale, already-deleted digits.
+     * by something else entirely, like an accessibility service's direct text edits, which
+     * never go through our onKeyDown at all. When that happens, our internal currentDigits
+     * buffer doesn't know a change just occurred, and would otherwise keep building
+     * predictions on top of stale, already-changed digits.
      *
-     * candidatesStart == -1 means the editor currently has no composing region. If we
-     * think we're mid-word (currentDigits non-empty) but the editor disagrees, something
-     * external touched the text — drop our stale buffer so the next key press starts clean.
+     * Checked two ways for robustness: (1) candidatesStart == -1 means the editor reports no
+     * composing region even though we think we have one — a good signal on editors that
+     * support composing regions properly. (2) directly re-reading the text before the cursor
+     * and comparing it to what we last set — this catches the case even when (1) doesn't fire
+     * reliably, since it doesn't depend on the editor correctly reporting composing state.
      */
     override fun onUpdateSelection(
         oldSelStart: Int, oldSelEnd: Int,
@@ -138,11 +156,19 @@ class TyrionInputMethodService : InputMethodService() {
         candidatesStart: Int, candidatesEnd: Int
     ) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
-        if (currentDigits.isNotEmpty() && candidatesStart == -1 && candidatesEnd == -1) {
+        if (currentDigits.isEmpty()) return
+
+        val noComposingRegionReported = candidatesStart == -1 && candidatesEnd == -1
+        val ic = currentInputConnection
+        val actualTextBefore = ic?.getTextBeforeCursor(composingPreviewText.length, 0)?.toString() ?: ""
+        val textMismatch = actualTextBefore != composingPreviewText
+
+        if (noComposingRegionReported || textMismatch) {
             currentDigits.clear()
             candidateIndex = 0
             lastActionWasPunct = false
             lastCommitLength = 0
+            composingPreviewText = ""
         }
     }
 
@@ -207,6 +233,7 @@ class TyrionInputMethodService : InputMethodService() {
                     commitCurrentWord(appendSpace = false)
                 }
                 sendDefaultEditorAction(true)
+                isSentenceStart = true
                 true
             }
             // Deliberately NOT intercepting KEYCODE_DPAD_CENTER, DPAD_UP/DOWN/LEFT/RIGHT:
@@ -237,7 +264,7 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.clear()
         candidateIndex = 0
         lastMultitapKeyCode = -1
-        updateOverlayText()
+        updateStatusNotification()
     }
 
     private fun togglePredictive() {
@@ -245,16 +272,21 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.clear()
         candidateIndex = 0
         lastMultitapKeyCode = -1
-        updateOverlayText()
+        updateStatusNotification()
     }
 
-    /** Used only for predictive (T9) word candidates. Per request: predictive words are
-     *  always lowercase — Proper mode no longer auto-capitalizes them after spaces. CAPS
-     *  still gives explicit uppercase since that's a deliberate user choice, not automatic.
-     *  Multi-tap mode has its own separate casing (casedChar below) and is unaffected. */
+    /** Used only for predictive (T9) word candidates. Proper mode capitalizes only at the
+     *  start of a sentence (isSentenceStart), not after every space. CAPS still gives
+     *  explicit uppercase since that's a deliberate user choice, not automatic. Multi-tap
+     *  mode has its own separate casing (casedChar below) and is unaffected. */
     private fun applyCase(word: String): String = when (mode) {
-        Mode.LOWER, Mode.PROPER -> word.lowercase()
+        Mode.LOWER -> word.lowercase()
         Mode.CAPS -> word.uppercase()
+        Mode.PROPER -> if (isSentenceStart) {
+            word.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        } else {
+            word.lowercase()
+        }
         Mode.NUMBER -> word
     }
 
@@ -312,16 +344,20 @@ class TyrionInputMethodService : InputMethodService() {
 
     private fun updateComposing() {
         val ic = currentInputConnection ?: return
-        ic.setComposingText(bestGuessFor(currentDigits.toString()), 1)
+        val display = bestGuessFor(currentDigits.toString())
+        ic.setComposingText(display, 1)
+        composingPreviewText = display
     }
 
     private fun commitCurrentWord(appendSpace: Boolean) {
         val ic = currentInputConnection
         val code = currentDigits.toString()
         if (code.isNotEmpty()) {
-            val textToCommit = bestGuessFor(code) + if (appendSpace) " " else ""
+            val word = bestGuessFor(code)
+            val textToCommit = word + if (appendSpace) " " else ""
             ic?.commitText(textToCommit, 1)
             lastCommitLength = textToCommit.length
+            isSentenceStart = false // a real word was just committed; sentence has started
         } else if (appendSpace) {
             ic?.commitText(" ", 1)
             lastCommitLength = 0 // a bare space alone isn't a "predicted word" to undo
@@ -329,6 +365,7 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.clear()
         candidateIndex = 0
         lastActionWasPunct = false
+        composingPreviewText = ""
     }
 
     // --- Manual multi-tap word composition (used when predictive is OFF) ---
@@ -366,11 +403,13 @@ class TyrionInputMethodService : InputMethodService() {
         } else {
             punctCycleIndex = 0
         }
-        ic.commitText(punctuations[punctCycleIndex], 1)
+        val chosen = punctuations[punctCycleIndex]
+        ic.commitText(chosen, 1)
         lastActionWasPunct = true
         lastMultitapKeyCode = -1
         isWordStart = true
         lastCommitLength = 0
+        isSentenceStart = chosen == "." || chosen == "!" || chosen == "?"
     }
 
     /** Returns true only if we actually consumed the key (i.e. there was something to delete). */
@@ -380,6 +419,7 @@ class TyrionInputMethodService : InputMethodService() {
             candidateIndex = 0
             if (currentDigits.isEmpty()) {
                 currentInputConnection?.commitText("", 1) // clears the composing span
+                composingPreviewText = ""
             } else {
                 updateComposing()
             }
@@ -418,60 +458,60 @@ class TyrionInputMethodService : InputMethodService() {
         lastMultitapKeyCode = -1
         isWordStart = true
         lastCommitLength = 0
+        composingPreviewText = ""
+        isSentenceStart = true
     }
 
-    // --- Floating mode badge (WindowManager overlay, independent of the IME view) ---
+    // --- Status bar notification (mode indicator) ---
 
     private fun statusText(): String =
         if (mode == Mode.NUMBER) "123" else "${caseLabel()} • ${if (predictiveEnabled) "T9" else "MULTI"}"
 
-    private fun addOverlayIfPermitted() {
-        if (overlayView != null) return
-        if (!Settings.canDrawOverlays(this)) return
-
-        val badge = TextView(this).apply {
-            text = statusText()
-            setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFF5B2A4D.toInt())
-            textSize = 16f
-            setPadding(28, 14, 28, 14)
-        }
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            // Centered near the top, clear of y=0 — right at the top edge risks sitting
-            // behind/under the real system status bar (clock/battery icons) on some
-            // devices, which was likely why the badge wasn't visible at all.
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = 0
-            y = 90
-        }
-
-        try {
-            windowManager.addView(badge, params)
-            overlayView = badge
-        } catch (e: Exception) {
-            // Permission revoked or window token issue; just skip showing the badge.
-        }
-    }
-
-    private fun removeOverlay() {
-        overlayView?.let {
-            try {
-                windowManager.removeView(it)
-            } catch (e: Exception) {
-                // Already removed or never attached; safe to ignore.
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(
+                NOTIF_CHANNEL_ID,
+                "TyrionDictionary mode",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Kasalukuyang mode ng TyrionDictionary keyboard"
+                setShowBadge(false)
             }
+            manager?.createNotificationChannel(channel)
         }
-        overlayView = null
     }
 
-    private fun updateOverlayText() {
-        overlayView?.text = statusText()
+    private fun hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun updateStatusNotification() {
+        if (!hasNotificationPermission()) return
+        val notification = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setContentTitle("TyrionDictionary")
+            .setContentText(statusText())
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        try {
+            NotificationManagerCompat.from(this).notify(NOTIF_ID, notification)
+        } catch (e: SecurityException) {
+            // Permission revoked between the check and the call; skip silently.
+        }
+    }
+
+    private fun cancelStatusNotification() {
+        NotificationManagerCompat.from(this).cancel(NOTIF_ID)
     }
 
     // --- Typing-state broadcast (lets ClickyCursor's accessibility service know

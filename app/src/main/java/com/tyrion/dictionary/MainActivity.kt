@@ -1,18 +1,26 @@
 package com.tyrion.dictionary
 
+import android.Manifest
 import android.content.Intent
-import android.net.Uri
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationManagerCompat
 
 /**
  * Setup screen. Android requires the user to manually enable a new input method
  * in system settings (an app cannot silently turn itself on as the keyboard),
  * so this screen just walks through those steps and gives a field to test typing.
+ *
+ * Status is shown via a status bar notification (not a floating overlay) — this is
+ * the same approach sspanak's TT9 uses, and is specifically documented to work
+ * reliably on Qin F21/F22 Pro-family phones.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -29,13 +37,20 @@ class MainActivity : AppCompatActivity() {
             imm.showInputMethodPicker()
         }
 
-        findViewById<Button>(R.id.btnGrantOverlay).setOnClickListener {
-            if (!Settings.canDrawOverlays(this)) {
+        findViewById<Button>(R.id.btnEnableNotifications).setOnClickListener {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+            } else {
+                // Permission already granted, or not needed on this Android version —
+                // just jump to the app's notification settings in case they were disabled
+                // manually at the OS level.
                 startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:$packageName")
-                    )
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                    }
                 )
             }
         }
@@ -43,14 +58,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        updateOverlayStatus()
+        updateNotificationStatus()
     }
 
-    private fun updateOverlayStatus() {
-        findViewById<TextView>(R.id.tvOverlayStatus).text = if (Settings.canDrawOverlays(this)) {
-            "Overlay permission: granted (makikita ang mode badge)"
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        updateNotificationStatus()
+    }
+
+    private fun updateNotificationStatus() {
+        val enabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        findViewById<TextView>(R.id.tvNotificationStatus).text = if (enabled) {
+            "Notification status: pinapayagan (makikita ang mode indicator)"
         } else {
-            "Overlay permission: hindi pa naibibigay (kailangan para makita ang mode badge)"
+            "Notification status: naka-disable — pindutin ang button sa itaas"
         }
     }
 }
