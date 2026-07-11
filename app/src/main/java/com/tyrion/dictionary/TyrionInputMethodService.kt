@@ -60,6 +60,7 @@ class TyrionInputMethodService : InputMethodService() {
         // whether we're actively composing text right now.
         private const val ACTION_TYPING_STATE = "com.tyrion.dictionary.TYPING_STATE"
         private const val EXTRA_TYPING = "typing"
+        private const val EXTRA_STATUS = "status"
         private const val CLICKY_CURSOR_PACKAGE = "com.example.clickycursor"
 
         private const val NOTIF_CHANNEL_ID = "tyrion_mode_channel"
@@ -283,6 +284,7 @@ class TyrionInputMethodService : InputMethodService() {
         candidateIndex = 0
         lastMultitapKeyCode = -1
         updateStatusNotification()
+        sendTypingState(true)
     }
 
     private fun togglePredictive() {
@@ -291,6 +293,7 @@ class TyrionInputMethodService : InputMethodService() {
         candidateIndex = 0
         lastMultitapKeyCode = -1
         updateStatusNotification()
+        sendTypingState(true)
     }
 
     /** Used only for predictive (T9) word candidates. Proper mode capitalizes only at the
@@ -539,6 +542,7 @@ class TyrionInputMethodService : InputMethodService() {
         val intent = Intent(ACTION_TYPING_STATE).apply {
             setPackage(CLICKY_CURSOR_PACKAGE)
             putExtra(EXTRA_TYPING, typing)
+            putExtra(EXTRA_STATUS, if (typing) statusText() else "")
         }
         sendBroadcast(intent)
     }
