@@ -22,10 +22,10 @@ import android.widget.TextView
  *   physical Back key dismiss any visible IME window rather than let it reach the app
  *   underneath — even for a tiny one-line badge. Showing zero IME window sidesteps that
  *   entirely, so Back always reaches the app on the first press.
- * - The mode/predictive status (e.g. "Abc • T9") is instead shown as a small floating
- *   overlay badge, drawn independently via WindowManager — NOT part of the IME-view
- *   system, so it doesn't trigger the Back-swallowing behavior above. This needs the
- *   "Display over other apps" permission, requested from MainActivity.
+ * - The mode/predictive status (e.g. "Proper • Predictive") is instead shown as a small
+ *   floating overlay badge, drawn independently via WindowManager — NOT part of the
+ *   IME-view system, so it doesn't trigger the Back-swallowing behavior above. This needs
+ *   the "Display over other apps" permission, requested from MainActivity.
  * - We also broadcast our actual typing start/stop to the ClickyCursor accessibility
  *   app (if installed), since that app used to infer "is a keyboard visible" purely by
  *   scanning accessibility windows — which never saw anything from us once we stopped
@@ -39,8 +39,8 @@ import android.widget.TextView
  * - 2-9: T9 predictive letters (or manual multi-tap letters when predictive is off)
  * - 0: space (confirms the current word)
  * - 1: punctuation cycle (. , ? ! ' - @)
- * - *: cycle word suggestion if mid-word, otherwise cycle case mode (Abc/ABC/abc/123)
- * - #: confirm word if mid-word; otherwise toggle predictive T9 on/off (or "." in 123 mode)
+ * - *: cycle word suggestion if mid-word, otherwise cycle case mode (Proper/CAPITAL/lowercase/Numbers)
+ * - #: confirm word if mid-word; otherwise toggle Predictive/Manual (or "." in Numbers mode)
  * - DEL: backspace (only consumed if there's actually something to delete)
  * - ENTER: confirm word + editor action
  */
@@ -64,6 +64,11 @@ class TyrionInputMethodService : InputMethodService() {
     private val currentDigits = StringBuilder()
     private var candidateIndex = 0
 
+    // Length of the last thing commitCurrentWord() inserted (word + optional space), so the
+    // very next backspace can delete the whole predicted word in one shot instead of char by
+    // char. Any other action resets this back to 0.
+    private var lastCommitLength = 0
+
     // --- Manual multi-tap state (used when predictiveEnabled == false) ---
     private var lastMultitapKeyCode = -1
     private var lastMultitapTime = 0L
@@ -74,7 +79,9 @@ class TyrionInputMethodService : InputMethodService() {
     // --- Punctuation cycling (shared by both modes) ---
     private var punctCycleIndex = -1
     private var lastActionWasPunct = false
-    private val punctuations = listOf(".", ",", "?", "!", "'", "-", "@")
+    private val punctuations = listOf(
+        ".", ",", "!", "?", "(", ")", "&", "%", "-", "_", ":", ";", "'", "\"", "<", ">", "@", "#"
+    )
 
     // --- Floating mode badge (independent of the IME-view system) ---
     private lateinit var windowManager: WindowManager
@@ -135,6 +142,7 @@ class TyrionInputMethodService : InputMethodService() {
             currentDigits.clear()
             candidateIndex = 0
             lastActionWasPunct = false
+            lastCommitLength = 0
         }
     }
 
@@ -151,6 +159,7 @@ class TyrionInputMethodService : InputMethodService() {
         // --- Numeric mode: keys type literal digits, nothing is predicted ---
         if (mode == Mode.NUMBER && digitChar != null) {
             currentInputConnection?.commitText(digitChar.toString(), 1)
+            lastCommitLength = 0
             return true
         }
 
@@ -168,6 +177,7 @@ class TyrionInputMethodService : InputMethodService() {
                     currentInputConnection?.commitText(" ", 1)
                     lastMultitapKeyCode = -1
                     isWordStart = true
+                    lastCommitLength = 0
                 }
                 true
             }
@@ -238,10 +248,13 @@ class TyrionInputMethodService : InputMethodService() {
         updateOverlayText()
     }
 
+    /** Used only for predictive (T9) word candidates. Per request: predictive words are
+     *  always lowercase — Proper mode no longer auto-capitalizes them after spaces. CAPS
+     *  still gives explicit uppercase since that's a deliberate user choice, not automatic.
+     *  Multi-tap mode has its own separate casing (casedChar below) and is unaffected. */
     private fun applyCase(word: String): String = when (mode) {
-        Mode.LOWER -> word.lowercase()
+        Mode.LOWER, Mode.PROPER -> word.lowercase()
         Mode.CAPS -> word.uppercase()
-        Mode.PROPER -> word.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
         Mode.NUMBER -> word
     }
 
@@ -276,6 +289,7 @@ class TyrionInputMethodService : InputMethodService() {
         currentDigits.append(digit)
         candidateIndex = 0
         lastActionWasPunct = false
+        lastCommitLength = 0
         updateComposing()
     }
 
@@ -305,9 +319,12 @@ class TyrionInputMethodService : InputMethodService() {
         val ic = currentInputConnection
         val code = currentDigits.toString()
         if (code.isNotEmpty()) {
-            ic?.commitText(bestGuessFor(code) + if (appendSpace) " " else "", 1)
+            val textToCommit = bestGuessFor(code) + if (appendSpace) " " else ""
+            ic?.commitText(textToCommit, 1)
+            lastCommitLength = textToCommit.length
         } else if (appendSpace) {
             ic?.commitText(" ", 1)
+            lastCommitLength = 0 // a bare space alone isn't a "predicted word" to undo
         }
         currentDigits.clear()
         candidateIndex = 0
@@ -333,6 +350,7 @@ class TyrionInputMethodService : InputMethodService() {
         lastMultitapTime = now
         isWordStart = false
         lastActionWasPunct = false
+        lastCommitLength = 0
     }
 
     // --- Shared: punctuation cycling and backspace ---
@@ -352,6 +370,7 @@ class TyrionInputMethodService : InputMethodService() {
         lastActionWasPunct = true
         lastMultitapKeyCode = -1
         isWordStart = true
+        lastCommitLength = 0
     }
 
     /** Returns true only if we actually consumed the key (i.e. there was something to delete). */
@@ -365,12 +384,22 @@ class TyrionInputMethodService : InputMethodService() {
                 updateComposing()
             }
             lastActionWasPunct = false
+            lastCommitLength = 0
             return true
         }
 
         lastActionWasPunct = false
         lastMultitapKeyCode = -1
         val ic = currentInputConnection ?: return false
+
+        if (predictiveEnabled && lastCommitLength > 0) {
+            // One-shot: the very next backspace right after a predicted word was confirmed
+            // deletes the whole word (and its trailing space, if any) instead of one letter.
+            ic.deleteSurroundingText(lastCommitLength, 0)
+            lastCommitLength = 0
+            return true
+        }
+
         val before = ic.getTextBeforeCursor(1, 0)
         return if (!before.isNullOrEmpty()) {
             ic.deleteSurroundingText(1, 0)
@@ -388,6 +417,7 @@ class TyrionInputMethodService : InputMethodService() {
         lastActionWasPunct = false
         lastMultitapKeyCode = -1
         isWordStart = true
+        lastCommitLength = 0
     }
 
     // --- Floating mode badge (WindowManager overlay, independent of the IME view) ---
@@ -403,8 +433,8 @@ class TyrionInputMethodService : InputMethodService() {
             text = statusText()
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF5B2A4D.toInt())
-            textSize = 13f
-            setPadding(24, 8, 24, 8)
+            textSize = 16f
+            setPadding(28, 14, 28, 14)
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -413,9 +443,12 @@ class TyrionInputMethodService : InputMethodService() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
+            // Centered near the top, clear of y=0 — right at the top edge risks sitting
+            // behind/under the real system status bar (clock/battery icons) on some
+            // devices, which was likely why the badge wasn't visible at all.
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = 0
-            y = 0
+            y = 90
         }
 
         try {
