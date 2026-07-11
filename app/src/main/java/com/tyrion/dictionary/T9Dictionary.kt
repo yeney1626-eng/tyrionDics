@@ -1,12 +1,16 @@
 package com.tyrion.dictionary
 
 import android.content.Context
-import java.io.BufferedReader
-import java.io.InputStreamReader
 
 /**
- * Loads the Filipino word list once and indexes every word by its T9 digit code
+ * Loads the Filipino word list and indexes every word by its T9 digit code
  * (e.g. "bahay" -> "22429"), so key presses can be matched to candidate words instantly.
+ *
+ * At ~652k words this file is too large to parse synchronously on the main thread without
+ * risking a visible freeze on first keyboard use — so loading happens on a background
+ * thread. Reads (candidatesFor) always see either the old index (empty, before the first
+ * load finishes) or a fully-built new one, atomically swapped in via a @Volatile reference
+ * — never a half-built map, so no locking is needed on the read path.
  */
 object T9Dictionary {
 
@@ -21,37 +25,47 @@ object T9Dictionary {
         '9' to "wxyz"
     )
 
-    private val index = HashMap<String, MutableList<String>>()
-    private var loaded = false
+    @Volatile private var index: Map<String, List<String>> = emptyMap()
+    @Volatile private var loadStarted = false
 
-    @Synchronized
+    /** Kicks off loading in the background if it hasn't started yet. Safe to call repeatedly. */
     fun ensureLoaded(context: Context) {
-        if (loaded) return
-        try {
-            val reader = BufferedReader(
-                InputStreamReader(context.assets.open("dictionary_fil.txt"), Charsets.UTF_8)
-            )
-            reader.useLines { lines ->
-                for (line in lines) {
-                    val word = line.trim()
-                    if (word.isEmpty()) continue
-                    val code = wordToT9(word) ?: continue
-                    index.getOrPut(code) { mutableListOf() }.add(word)
-                }
-            }
-            for (list in index.values) {
-                list.sortWith(compareBy({ it.length }, { it }))
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (loadStarted) return
+        synchronized(this) {
+            if (loadStarted) return
+            loadStarted = true
+            val appContext = context.applicationContext
+            Thread({ index = buildIndex(appContext) }, "T9DictionaryLoader").start()
         }
-        loaded = true
     }
+
+    /** True once the background load has actually finished and candidatesFor() has real data. */
+    fun isReady(): Boolean = index.isNotEmpty()
 
     fun candidatesFor(code: String): List<String>? = index[code]
 
     /** Letters assigned to a given digit key, e.g. lettersForDigit('2') -> "abc". Used by manual multi-tap mode. */
     fun lettersForDigit(digit: Char): String? = keyLetters[digit]
+
+    private fun buildIndex(context: Context): Map<String, List<String>> {
+        val map = HashMap<String, MutableList<String>>()
+        try {
+            context.assets.open("dictionary_fil.txt").bufferedReader(Charsets.UTF_8).useLines { lines ->
+                for (line in lines) {
+                    val word = line.trim()
+                    if (word.isEmpty()) continue
+                    val code = wordToT9(word) ?: continue
+                    map.getOrPut(code) { mutableListOf() }.add(word)
+                }
+            }
+            for (list in map.values) {
+                list.sortWith(compareBy({ it.length }, { it }))
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return map
+    }
 
     private fun wordToT9(word: String): String? {
         val sb = StringBuilder()
