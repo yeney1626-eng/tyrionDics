@@ -156,11 +156,28 @@ class TyrionInputMethodService : InputMethodService() {
         candidatesStart: Int, candidatesEnd: Int
     ) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
-        if (currentDigits.isEmpty()) return
+        verifyComposingStillValid(candidatesStart, candidatesEnd)
+    }
 
+    /**
+     * Confirms our internal currentDigits buffer still matches reality, dropping it if not.
+     * Called two ways: (1) passively from onUpdateSelection, which is NOT guaranteed to fire
+     * for every kind of external edit — some apps' EditText implementations don't reliably
+     * propagate accessibility-originated text changes back through the normal selection-
+     * update callback. So it's also called (2) actively, at the very start of every
+     * onKeyDown, which re-checks reality directly regardless of whether any callback fired
+     * in between. This is what actually closes the "still predicting from deleted digits"
+     * bug even when onUpdateSelection alone doesn't catch it.
+     */
+    private fun verifyComposingStillValid(candidatesStart: Int = -2, candidatesEnd: Int = -2) {
+        if (currentDigits.isEmpty()) return
+        val ic = currentInputConnection ?: return
+
+        // -2 as a sentinel means "not provided by this caller" (the active/onKeyDown path) —
+        // only the passive onUpdateSelection path actually knows this, so only check it there.
         val noComposingRegionReported = candidatesStart == -1 && candidatesEnd == -1
-        val ic = currentInputConnection
-        val actualTextBefore = ic?.getTextBeforeCursor(composingPreviewText.length, 0)?.toString() ?: ""
+
+        val actualTextBefore = ic.getTextBeforeCursor(composingPreviewText.length, 0)?.toString() ?: ""
         val textMismatch = actualTextBefore != composingPreviewText
 
         if (noComposingRegionReported || textMismatch) {
@@ -174,6 +191,7 @@ class TyrionInputMethodService : InputMethodService() {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         Log.d("TyrionIME", "onKeyDown keyCode=$keyCode mode=$mode predictive=$predictiveEnabled")
+        verifyComposingStillValid()
 
         // Never touch Back — always let it fall straight through to the app/system.
         if (keyCode == KeyEvent.KEYCODE_BACK) {
