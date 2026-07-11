@@ -116,15 +116,21 @@ class TyrionInputMethodService : InputMethodService() {
 
     override fun onCreateInputView(): View = View(this)
 
-    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
-        super.onStartInputView(info, restarting)
+    // Deliberately using onStartInput/onFinishInput (not the "...View" variants) — those are
+    // tied to the input VIEW's show/hide lifecycle specifically, which fires unreliably (or
+    // asymmetrically: start but not finish) when onEvaluateInputViewShown() is always false,
+    // as it is here. onStartInput/onFinishInput fire for every editor focus session
+    // unconditionally, regardless of whether any view is ever actually shown — which is what
+    // was actually causing the status badge to get stuck visible after leaving a field.
+    override fun onStartInput(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInput(info, restarting)
         resetWordState()
         updateStatusNotification()
         sendTypingState(true)
     }
 
-    override fun onFinishInputView(finishingInput: Boolean) {
-        super.onFinishInputView(finishingInput)
+    override fun onFinishInput() {
+        super.onFinishInput()
         // Commit any half-typed word so it isn't silently lost when switching away.
         if (currentDigits.isNotEmpty()) {
             commitCurrentWord(appendSpace = false)
