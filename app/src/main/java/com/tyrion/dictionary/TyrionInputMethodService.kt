@@ -114,6 +114,30 @@ class TyrionInputMethodService : InputMethodService() {
         removeOverlay()
     }
 
+    /**
+     * Fires whenever the field's text/cursor changes for ANY reason — including edits made
+     * by something else entirely, like ClickyCursor's accessibility-based backspace, which
+     * edits the field directly and never goes through our onKeyDown at all. When that
+     * happens, our internal currentDigits buffer doesn't know a delete just occurred, and
+     * would otherwise keep building predictions on top of stale, already-deleted digits.
+     *
+     * candidatesStart == -1 means the editor currently has no composing region. If we
+     * think we're mid-word (currentDigits non-empty) but the editor disagrees, something
+     * external touched the text — drop our stale buffer so the next key press starts clean.
+     */
+    override fun onUpdateSelection(
+        oldSelStart: Int, oldSelEnd: Int,
+        newSelStart: Int, newSelEnd: Int,
+        candidatesStart: Int, candidatesEnd: Int
+    ) {
+        super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        if (currentDigits.isNotEmpty() && candidatesStart == -1 && candidatesEnd == -1) {
+            currentDigits.clear()
+            candidateIndex = 0
+            lastActionWasPunct = false
+        }
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         Log.d("TyrionIME", "onKeyDown keyCode=$keyCode mode=$mode predictive=$predictiveEnabled")
 
