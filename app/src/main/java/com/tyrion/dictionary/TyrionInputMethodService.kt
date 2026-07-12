@@ -4,6 +4,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.util.Log
@@ -13,6 +18,7 @@ import android.view.inputmethod.EditorInfo
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.IconCompat
 
 /**
  * TyrionDictionary IME — reads the phone's physical number keys directly
@@ -331,6 +337,14 @@ class TyrionInputMethodService : InputMethodService() {
         Mode.NUMBER -> "123"
     }
 
+    /** Short glyph (fits legibly in a tiny status bar icon) for the current mode. */
+    private fun iconGlyph(): String = when (mode) {
+        Mode.PROPER -> "Aa"
+        Mode.CAPS -> "AA"
+        Mode.LOWER -> "aa"
+        Mode.NUMBER -> "12"
+    }
+
     /** Turns a T9 digit code with no dictionary match into letters instead of raw numbers,
      *  e.g. "26" (no match) -> "an" (first letter of each key), so the user never sees digits. */
     private fun literalLettersFallback(code: String): String {
@@ -519,10 +533,30 @@ class TyrionInputMethodService : InputMethodService() {
         }
     }
 
+    /** Draws the current mode's short glyph onto a small bitmap to use as the actual status
+     *  bar icon — so the mode is visible at a glance without pulling down the shade, and
+     *  updates live every time updateStatusNotification() is called (every mode change). */
+    private fun buildStatusIcon(): IconCompat {
+        val size = 96
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            typeface = Typeface.create(Typeface.DEFAULT_BOLD, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+        }
+        val glyph = iconGlyph()
+        // Shrink the font a bit for two-character glyphs so both letters fit clearly.
+        paint.textSize = if (glyph.length > 1) size * 0.52f else size * 0.7f
+        val yPos = size / 2f - (paint.descent() + paint.ascent()) / 2f
+        canvas.drawText(glyph, size / 2f, yPos, paint)
+        return IconCompat.createWithBitmap(bitmap)
+    }
+
     private fun updateStatusNotification() {
         if (!hasNotificationPermission()) return
         val notification = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setSmallIcon(buildStatusIcon())
             .setContentTitle("TyrionDictionary")
             .setContentText(statusText())
             .setOngoing(true)
